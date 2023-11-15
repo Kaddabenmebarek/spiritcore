@@ -1,0 +1,12 @@
+/.idea/
+**/bin/
+**/tmp/
+**/dependency-reduced-pom.xml
+**/.settings
+**/target/
+**/.classpath
+**/.project
+**/*.iml
+**/.metadata/
+/.gradle/
+/REPLACE BY YOUR LOCAL MAVEN REPO/

@@ -1,0 +1,122 @@
+variables:
+  NEXUS_PROJECT_PATH: com%2Factelion%2Fresearch%2Fhts_core
+  PROJECT_PUSH_TOKEN: ${HTS_CORE_PUSH_TOKEN}
+# This template uses jdk8 for verifying and deploying images
+image: $CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX/maven:3.8.4-amazoncorretto-11
+
+# To keep cache across branches add 'key: "$CI_JOB_NAME"'
+cache:
+  key: "$CI_PIPELINE_ID"
+  paths:
+    - .m2
+    - .m2/repository
+    - .scripts
+
+stages:          # List of stages for jobs, and their order of execution
+  - prepare
+  - build
+  - package
+  - deploy
+  - cleanup
+
+#####################################################
+# get global resources
+#####################################################
+resources:
+  stage: prepare
+  script:
+    - curl --verbose --location --output resources.sh --header "PRIVATE-TOKEN:${CICD_UTILS_TOKEN}" "${RESOURCES_TOMCAT_URL}"
+    - chmod a+x resources.sh
+    - bash resources.sh
+  artifacts:
+    reports:
+      # Use artifacts:reports:dotenv to expose the variables to other jobs
+      dotenv: variables.env
+
+#update_pom_version:
+#  stage: prepare
+#  needs: [resources]
+  # use this image to have git and maven in it
+#  script:
+#    - if [[ $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH ]]; then exit 0; fi
+#    - bash .scripts/update_pom_version.sh
+#  artifacts:
+#    reports:
+#      dotenv: variables.env
+
+build:
+  stage: build
+#  needs: [resources, update_pom_version]
+  script:
+    - echo "Compiling the code..."
+    - mvn $MAVEN_CLI_OPTS compile
+    - echo "Compile complete."
+
+package:
+  stage: package
+#  needs: [resources, update_pom_version, build]
+  script:
+    #if version was update in update_pom_version, get updated version in pom (git cmd not available)
+    - if [[ $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $IS_UPDATED_VERSION ]]; then mvn versions:set -DremoveSnapshot; fi
+    - 'mvn $MAVEN_CLI_OPTS package -U -Dmaven.test.skip=true'
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - pom.xml
+      - target/*.jar
+
+#####################################################
+# Deploy (Nexus)
+#####################################################
+deploy_snapshot:
+  stage: deploy
+  needs: [resources, package]
+  environment:
+    name: Snapshots
+    url: ${NEXUS_SNAPSHOTS_URL}:${NEXUS_PROJECT_PATH}
+  script:
+    # Skip here in script if the version in pom is not a Snapshot
+    - if [[ $IS_SNAPSHOT == "false" ]]; then echo "Version is not a Snapshot. deploy_snapshot is skipped. Update version number in pom if you want a snapshot release"; exit 1; fi
+    - echo "Publishing to Nexus - RELEASE version $VERSION"
+    - mvn $MAVEN_CLI_OPTS deploy -Dmaven.test.skip=true
+  rules:
+    # NOTE The first matching rule is used
+    # only for tags containing a version number only X.Y[.Z]
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "develop" && $CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^\d+\.\d+(\.\d+)?$/'
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      when: manual
+
+deploy_release:
+  stage: deploy
+#  needs: [resources, update_pom_version, package]
+  environment:
+    name: Releases
+    url: ${NEXUS_RELEASES_URL}:${NEXUS_PROJECT_PATH}
+  script:
+    # Skip here in script if the version in pom is not a Snapshot
+    - if [[ $IS_SNAPSHOT == "true" ]]; then echo "deploy_release skipped as pom declare a Snapshot version. Update version number in pom if you want a release"; exit 1; fi
+    - echo "Publishing to Nexus - Snapshot version $VERSION"
+    - mvn $MAVEN_CLI_OPTS deploy -Dmaven.test.skip=true
+  rules:
+    # NOTE The first matching rule is used
+    # - if: '$CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH' # exclude if branch is not the default branch
+    #   when: never
+    # only for tags containing a version number only X.Y[.Z]
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^\d+\.\d+(\.\d+)?$/'
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+
+
+# Clear pipeline cache (see https://stackoverflow.com/questions/48469675/clearing-the-pipeline-cache-with-gitlab-ci)
+#####################################################
+cleanup:
+  stage: cleanup
+  script:
+    - echo "Cleaning up"
+    - rm -rf "${CACHE_PATH}/${CI_PIPELINE_ID}"
+  when: on_success
